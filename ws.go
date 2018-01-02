@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+	"log"
 
-	"github.com/thebotguys/signalr"
+	"github.com/zoh/signalr_bittrex"
 )
 
 type OrderUpdate struct {
@@ -27,6 +28,26 @@ type ExchangeState struct {
 	Sells      []OrderUpdate
 	Fills      []Fill
 	Initial    bool
+}
+
+type SummaryState struct {
+	MarketName     string
+	High           float64
+	Low            float64
+	Last           float64
+	Volume         float64
+	BaseVolume     float64
+	Bid            float64
+	Ask            float64
+	OpenBuyOrders  int
+	OpenSellOrders int
+	TimeStamp      string
+	Created        string
+}
+
+type SummaryDeltas struct {
+	Nounce int
+	Deltas []SummaryState
 }
 
 // doAsyncTimeout runs f in a different goroutine
@@ -84,7 +105,7 @@ func parseStates(messages []json.RawMessage, dataCh chan<- ExchangeState, market
 // Updates will be sent to dataCh.
 // To stop subscription, send to, or close 'stop'.
 func (b *Bittrex) SubscribeExchangeUpdate(market string, dataCh chan<- ExchangeState, stop <-chan bool) error {
-	const timeout = 5 * time.Second
+	const timeout = 10 * time.Second
 	client := signalr.NewWebsocketClient()
 	client.OnClientMethod = func(hub string, method string, messages []json.RawMessage) {
 		if hub != WS_HUB || method != "updateExchangeState" {
@@ -124,4 +145,66 @@ func (b *Bittrex) SubscribeExchangeUpdate(market string, dataCh chan<- ExchangeS
 	case <-client.DisconnectedChannel:
 	}
 	return nil
+}
+
+func (b *Bittrex) SubscribeSummaryDeltas(marketsCh map[string]chan SummaryState, stop <-chan bool) error {
+	const timeout = 10 * time.Second
+	client := signalr.NewWebsocketClient()
+	client.OnClientMethod = func(hub string, method string, messages []json.RawMessage) {
+		if hub != WS_HUB || method != "updateSummaryState" {
+			return
+		}
+		parseSummaries(messages, marketsCh)
+	}
+	err := doAsyncTimeout(func() error {
+		return client.Connect("https", WS_BASE, []string{WS_HUB})
+	}, func(err error) {
+		if err == nil {
+			client.Close()
+		}
+	}, timeout)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	var msg json.RawMessage
+	err = doAsyncTimeout(func() error {
+		var err error
+		msg, err = subForMarketsSum(client)
+		return err
+	}, nil, timeout)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-stop:
+	case <-client.DisconnectedChannel:
+	}
+	return nil
+}
+
+func parseSummaries(messages []json.RawMessage, marketsCh map[string]chan SummaryState) {
+	deltas := SummaryDeltas{}
+	if err := json.Unmarshal(messages[0], &deltas); err != nil {
+		log.Println(err)
+		return
+	}
+	markets := make(map[string]SummaryState, len(deltas.Deltas))
+	for _, market := range deltas.Deltas {
+		markets[market.MarketName] = market
+	}
+	for marketName, marketCh := range marketsCh {
+		if market, ok := markets[marketName]; ok {
+			marketCh <- market
+		}
+	}
+}
+
+func subForMarketsSum(client *signalr.Client) (json.RawMessage, error) {
+	msg, err := client.CallHub(WS_HUB, "SubscribeToSummaryDeltas")
+	if err != nil {
+		log.Println(err)
+		return json.RawMessage{}, err
+	}
+	return msg, nil
 }
