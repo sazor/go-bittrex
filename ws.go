@@ -147,14 +147,16 @@ func (b *Bittrex) SubscribeExchangeUpdate(market string, dataCh chan<- ExchangeS
 	return nil
 }
 
-func (b *Bittrex) SubscribeSummaryDeltas(marketsCh map[string]chan SummaryState, stop <-chan bool) error {
+func (b *Bittrex) SubscribeSpecificMarketsDeltas(marketsCh map[string]chan SummaryState, stop <-chan bool) error {
 	const timeout = 10 * time.Second
 	client := signalr.NewWebsocketClient()
 	client.OnClientMethod = func(hub string, method string, messages []json.RawMessage) {
-		if hub != WS_HUB || method != "updateSummaryState" {
+		deltas, err := parseDeltas(messages)
+		if err != nil {
+			log.Println(err)
 			return
 		}
-		parseSummaries(messages, marketsCh)
+		sendSeparatedDeltas(deltas, marketsCh)
 	}
 	err := doAsyncTimeout(func() error {
 		return client.Connect("https", WS_BASE, []string{WS_HUB})
@@ -183,21 +185,45 @@ func (b *Bittrex) SubscribeSummaryDeltas(marketsCh map[string]chan SummaryState,
 	return nil
 }
 
-func parseSummaries(messages []json.RawMessage, marketsCh map[string]chan SummaryState) {
-	deltas := SummaryDeltas{}
-	if err := json.Unmarshal(messages[0], &deltas); err != nil {
-		log.Println(err)
-		return
-	}
-	markets := make(map[string]SummaryState, len(deltas.Deltas))
-	for _, market := range deltas.Deltas {
-		markets[market.MarketName] = market
-	}
-	for marketName, marketCh := range marketsCh {
-		if market, ok := markets[marketName]; ok {
-			marketCh <- market
+func (b *Bittrex) SubscribeMarketsDeltas(deltasCh chan []SummaryState, stop <-chan bool) error {
+	const timeout = 10 * time.Second
+	client := signalr.NewWebsocketClient()
+	client.OnClientMethod = func(hub string, method string, messages []json.RawMessage) {
+		if hub != WS_HUB || method != "updateSummaryState" {
+			return
 		}
+		deltas, err := parseDeltas(messages)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		sendDeltas(deltas, deltasCh)
 	}
+	err := doAsyncTimeout(func() error {
+		return client.Connect("https", WS_BASE, []string{WS_HUB})
+	}, func(err error) {
+		if err == nil {
+			client.Close()
+		}
+	}, timeout)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	var msg json.RawMessage
+	err = doAsyncTimeout(func() error {
+		var err error
+		msg, err = subForMarketsSum(client)
+		return err
+	}, nil, timeout)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-stop:
+	case <-client.DisconnectedChannel:
+	}
+	return nil
 }
 
 func subForMarketsSum(client *signalr.Client) (json.RawMessage, error) {
@@ -208,3 +234,29 @@ func subForMarketsSum(client *signalr.Client) (json.RawMessage, error) {
 	}
 	return msg, nil
 }
+
+func parseDeltas(messages []json.RawMessage) ([]SummaryState, error) {
+	deltas := SummaryDeltas{}
+	if err := json.Unmarshal(messages[0], &deltas); err != nil {
+		log.Println(err)
+		return nil, err
+	}
+	return deltas.Deltas, nil
+}
+
+func sendDeltas(deltas []SummaryState, deltasCh chan []SummaryState) {
+	deltasCh <- deltas
+}
+
+func sendSeparatedDeltas(deltas []SummaryState, marketsCh map[string]chan SummaryState) {
+	markets := make(map[string]SummaryState, len(deltas))
+	for _, market := range deltas {
+		markets[market.MarketName] = market
+	}
+	for marketName, marketCh := range marketsCh {
+		if market, ok := markets[marketName]; ok {
+			marketCh <- market
+		}
+	}
+}
+
