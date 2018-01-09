@@ -3,8 +3,8 @@ package bittrex
 import (
 	"encoding/json"
 	"errors"
-	"time"
 	"log"
+	"time"
 
 	"github.com/zoh/signalr_bittrex"
 )
@@ -41,6 +41,7 @@ type SummaryState struct {
 	Ask            float64
 	OpenBuyOrders  int
 	OpenSellOrders int
+	PrevDay        float64
 	TimeStamp      string
 	Created        string
 }
@@ -259,4 +260,3 @@ func sendSeparatedDeltas(deltas []SummaryState, marketsCh map[string]chan Summar
 		}
 	}
 }
-
